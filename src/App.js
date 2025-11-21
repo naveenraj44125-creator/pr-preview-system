@@ -6,7 +6,7 @@ function App() {
     <div className="App">
       <header className="App-header">
         <h1>🚀 PR Preview System</h1>
-        <h2>Welcome to the PR Preview Demo!</h2>
+        <h2>Welcome to the PR Preview Demo! 🎉 NEW FEATURE</h2>
         <p>This demonstrates automatic preview environments for Pull Requests.</p>
       </header>
     </div>
