@@ -29,8 +29,63 @@ class PreviewManager:
             return False
     
     def create_instance(self, instance_name, pr_number, repo_name, branch):
-        """Create new Lightsail instance"""
+        """Create new Lightsail instance with user data"""
         print(f"Creating instance: {instance_name}")
+        
+        # Create user data script for deployment
+        user_data = f"""#!/bin/bash
+set -e
+exec > >(tee /var/log/user-data.log) 2>&1
+
+echo "🔧 Setting up preview environment..."
+
+# Update system
+apt-get update -qq
+apt-get install -y nginx git curl
+
+# Clone repository
+cd /home/ubuntu
+git clone https://github.com/{repo_name}.git app
+cd app
+git checkout {branch}
+
+# Detect app type and deploy
+if [ -f "package.json" ]; then
+    echo "📦 Node.js app detected"
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+    apt-get install -y nodejs
+    
+    cd /home/ubuntu/app
+    npm install
+    
+    # Check if it's a React app
+    if grep -q '"react"' package.json; then
+        echo "⚛️  React app detected"
+        npm run build
+        rm -rf /var/www/html/*
+        cp -r build/* /var/www/html/
+        
+        # Configure Nginx for React SPA
+        cat > /etc/nginx/sites-available/default << 'EOF'
+server {{
+    listen 80;
+    server_name _;
+    root /var/www/html;
+    index index.html;
+    
+    location / {{
+        try_files $uri $uri/ /index.html;
+    }}
+}}
+EOF
+    fi
+fi
+
+# Restart Nginx
+systemctl restart nginx
+
+echo "✅ Deployment complete!"
+"""
         
         try:
             response = self.lightsail.create_instances(
@@ -38,6 +93,7 @@ class PreviewManager:
                 availabilityZone=f'{self.region}a',
                 blueprintId='ubuntu_22_04',
                 bundleId='nano_3_0',
+                userData=user_data,
                 tags=[
                     {'key': 'Type', 'value': 'PR-Preview'},
                     {'key': 'PR', 'value': str(pr_number)},
@@ -104,144 +160,14 @@ class PreviewManager:
 
     def deploy_application(self, instance_name, instance_ip, repo_name, branch, commit_sha):
         """Deploy application to instance"""
-        print(f"📦 Deploying application...")
+        print(f"📦 Application deployment initiated via user data...")
+        print(f"⏳ Waiting for deployment to complete (this may take 3-5 minutes)...")
         
-        # Wait for SSH to be ready
-        print("⏳ Waiting for SSH to be ready...")
-        time.sleep(60)  # Give instance time to fully boot
+        # Wait for deployment to complete
+        time.sleep(180)  # Give time for user data script to run
         
-        # Create deployment script
-        deploy_script = f"""#!/bin/bash
-set -e
-
-echo "🔧 Setting up preview environment..."
-
-# Update system
-sudo apt-get update -qq
-
-# Install dependencies
-sudo apt-get install -y nginx git curl
-
-# Clone repository
-cd /home/ubuntu
-if [ -d "app" ]; then
-    cd app
-    git fetch origin
-    git checkout {branch}
-    git pull
-else
-    git clone https://github.com/{repo_name}.git app
-    cd app
-    git checkout {branch}
-fi
-
-# Detect app type and deploy
-if [ -f "package.json" ]; then
-    echo "📦 Node.js app detected"
-    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-    sudo apt-get install -y nodejs
-    npm install
-    
-    # Check if it's a React app
-    if grep -q '"react"' package.json; then
-        echo "⚛️  React app detected"
-        npm run build
-        sudo rm -rf /var/www/html/*
-        sudo cp -r build/* /var/www/html/
-        
-        # Configure Nginx for React SPA
-        sudo tee /etc/nginx/sites-available/default > /dev/null << 'NGINX_EOF'
-server {{{{
-    listen 80;
-    server_name _;
-    root /var/www/html;
-    index index.html;
-    
-    location / {{{{
-        try_files $uri $uri/ /index.html;
-    }}}}
-}}}}
-NGINX_EOF
-    else
-        echo "🟢 Node.js API detected"
-        # Install PM2
-        sudo npm install -g pm2
-        pm2 start npm --name "app" -- start
-        pm2 save
-        pm2 startup | tail -n 1 | sudo bash
-        
-        # Configure Nginx as reverse proxy
-        sudo tee /etc/nginx/sites-available/default > /dev/null << 'NGINX_EOF'
-server {{{{
-    listen 80;
-    server_name _;
-    location / {{{{
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }}}}
-}}}}
-NGINX_EOF
-    fi
-elif [ -f "requirements.txt" ]; then
-    echo "🐍 Python app detected"
-    sudo apt-get install -y python3-pip
-    pip3 install -r requirements.txt
-    
-    # Create systemd service
-    sudo tee /etc/systemd/system/app.service > /dev/null << 'SERVICE_EOF'
-[Unit]
-Description=Python App
-After=network.target
-
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/app
-ExecStart=/usr/bin/python3 app.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-    
-    sudo systemctl daemon-reload
-    sudo systemctl enable app
-    sudo systemctl start app
-    
-    # Configure Nginx as reverse proxy
-    sudo tee /etc/nginx/sites-available/default > /dev/null << 'NGINX_EOF'
-server {{{{
-    listen 80;
-    server_name _;
-    location / {{{{
-        proxy_pass http://localhost:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }}}}
-}}}}
-NGINX_EOF
-fi
-
-# Restart Nginx
-sudo systemctl restart nginx
-
-echo "✅ Deployment complete!"
-"""
-        
-        # Save script locally
-        with open('/tmp/deploy.sh', 'w') as f:
-            f.write(deploy_script)
-        
-        print(f"📤 Uploading deployment script to {instance_ip}...")
-        # Note: In production, you'd use SSH here
-        # For now, we'll use AWS Systems Manager or user data
-        
+        print(f"✅ Deployment should be complete. Check {instance_ip} in your browser.")
         return True
-
     def delete_instance(self, instance_name):
         """Delete Lightsail instance"""
         print(f"🗑️  Deleting instance: {instance_name}")
