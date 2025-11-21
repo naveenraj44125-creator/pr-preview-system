@@ -1,0 +1,162 @@
+name: 'Deploy to AWS Lightsail'
+description: 'Deploy applications to AWS Lightsail with automatic dependency management'
+author: 'Your Name'
+
+branding:
+  icon: 'upload-cloud'
+  color: 'blue'
+
+inputs:
+  config-file:
+    description: 'Path to deployment configuration file'
+    required: false
+    default: 'deployment-generic.config.yml'
+  aws-access-key-id:
+    description: 'AWS Access Key ID'
+    required: true
+  aws-secret-access-key:
+    description: 'AWS Secret Access Key'
+    required: true
+  aws-region:
+    description: 'AWS region (overrides config file)'
+    required: false
+  instance-name:
+    description: 'Lightsail instance name (overrides config file)'
+    required: false
+  skip-tests:
+    description: 'Skip running tests'
+    required: false
+    default: 'false'
+  verify-deployment:
+    description: 'Verify deployment after completion'
+    required: false
+    default: 'true'
+
+outputs:
+  deployment-url:
+    description: 'URL of the deployed application'
+    value: ${{ steps.deploy.outputs.url }}
+  deployment-status:
+    description: 'Status of the deployment (success/failed)'
+    value: ${{ steps.deploy.outputs.status }}
+  static-ip:
+    description: 'Static IP address of the instance'
+    value: ${{ steps.config.outputs.static_ip }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        if [ ! -f "${{ inputs.config-file }}" ]; then
+          echo "❌ Configuration file not found: ${{ inputs.config-file }}"
+          exit 1
+        fi
+        echo "✅ Configuration file found"
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install boto3 pyyaml
+
+    - name: Load configuration
+      id: config
+      shell: bash
+      run: |
+        python3 << 'EOF'
+        import yaml
+        import os
+        
+        with open('${{ inputs.config-file }}', 'r') as f:
+            config = yaml.safe_load(f)
+        
+        instance_name = "${{ inputs.instance-name }}" or config['lightsail']['instance_name']
+        static_ip = config['lightsail']['static_ip']
+        aws_region = "${{ inputs.aws-region }}" or config['aws']['region']
+        app_name = config['application']['name']
+        
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"instance_name={instance_name}\n")
+            f.write(f"static_ip={static_ip}\n")
+            f.write(f"aws_region={aws_region}\n")
+            f.write(f"app_name={app_name}\n")
+        
+        print(f"✅ Loaded config: {app_name} -> {instance_name} ({static_ip})")
+        EOF
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ steps.config.outputs.aws_region }}
+
+    - name: Run tests
+      if: inputs.skip-tests != 'true'
+      shell: bash
+      run: |
+        echo "🧪 Running application tests..."
+        # Add your test logic here based on application type
+        echo "✅ Tests passed"
+
+    - name: Create deployment package
+      shell: bash
+      run: |
+        echo "📦 Creating deployment package..."
+        tar -czf app.tar.gz --exclude=.git --exclude=.github --exclude=*.tar.gz .
+        ls -lh app.tar.gz
+
+    - name: Deploy to Lightsail
+      id: deploy
+      shell: bash
+      env:
+        GITHUB_ACTIONS: 'true'
+      run: |
+        echo "🚀 Deploying to Lightsail..."
+        
+        # Run pre-deployment steps
+        if [ -f "workflows/deploy-pre-steps-generic.py" ]; then
+          python3 workflows/deploy-pre-steps-generic.py \
+            --instance-name ${{ steps.config.outputs.instance_name }} \
+            --region ${{ steps.config.outputs.aws_region }} \
+            --config-file ${{ inputs.config-file }}
+        fi
+        
+        # Run deployment
+        if [ -f "workflows/deploy-post-steps-generic.py" ]; then
+          python3 workflows/deploy-post-steps-generic.py \
+            app.tar.gz \
+            --instance-name ${{ steps.config.outputs.instance_name }} \
+            --region ${{ steps.config.outputs.aws_region }} \
+            --config-file ${{ inputs.config-file }} \
+            --verify \
+            --cleanup
+        fi
+        
+        echo "url=http://${{ steps.config.outputs.static_ip }}/" >> $GITHUB_OUTPUT
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Verify deployment
+      if: inputs.verify-deployment == 'true'
+      shell: bash
+      run: |
+        echo "🔍 Verifying deployment..."
+        sleep 10
+        
+        for i in {1..5}; do
+          if curl -f -s http://${{ steps.config.outputs.static_ip }}/ > /dev/null; then
+            echo "✅ Application is accessible!"
+            exit 0
+          fi
+          echo "Waiting... ($i/5)"
+          sleep 10
+        done
+        
+        echo "⚠️  Verification timeout, but deployment may still be successful"

@@ -1,0 +1,36 @@
+name: React Dashboard Deployment
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'example-react-app/**'
+      - 'deployment-react.config.yml'
+      - '.github/workflows/deploy-react.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # Required for OIDC authentication
+  contents: read    # Required to checkout code
+
+jobs:
+  deploy:
+    name: Deploy React Dashboard
+    uses: ./.github/workflows/deploy-generic-reusable.yml
+    with:
+      config_file: 'deployment-react.config.yml'
+      skip_tests: false
+  
+  summary:
+    name: Deployment Summary
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Show Deployment Results
+        run: |
+          echo "## React Dashboard Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY

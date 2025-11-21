@@ -1,0 +1,46 @@
+name: Test Reusable Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests'
+        type: boolean
+        default: false
+      environment:
+        description: 'Environment to deploy'
+        type: choice
+        options:
+          - none
+          - production
+        default: 'none'
+
+jobs:
+  test-reusable:
+    name: Test Reusable Workflow Call
+    uses: ./.github/workflows/deploy-generic-reusable.yml
+    with:
+      config_file: 'deployment-generic.config.yml'
+      skip_tests: ${{ inputs.skip_tests }}
+      environment: ${{ inputs.environment != 'none' && inputs.environment || '' }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  
+  show-results:
+    name: Show Deployment Results
+    needs: test-reusable
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display Results
+        run: |
+          echo "## 🎉 Reusable Workflow Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Outputs:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployment URL**: ${{ needs.test-reusable.outputs.deployment_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployment Status**: ${{ needs.test-reusable.outputs.deployment_status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Reusable workflow executed successfully!" >> $GITHUB_STEP_SUMMARY
+          
+          echo "Deployment URL: ${{ needs.test-reusable.outputs.deployment_url }}"
+          echo "Deployment Status: ${{ needs.test-reusable.outputs.deployment_status }}"

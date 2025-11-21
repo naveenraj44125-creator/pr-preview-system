@@ -1,0 +1,588 @@
+name: Reusable Generic Application Deployment
+
+on:
+  workflow_call:
+    inputs:
+      config_file:
+        description: 'Path to deployment config file'
+        required: false
+        type: string
+        default: 'deployment-generic.config.yml'
+      aws_region:
+        description: 'AWS region (overrides config)'
+        required: false
+        type: string
+      instance_name:
+        description: 'Lightsail instance name (overrides config)'
+        required: false
+        type: string
+      skip_tests:
+        description: 'Skip test job'
+        required: false
+        type: boolean
+        default: false
+      environment:
+        description: 'GitHub environment to use'
+        required: false
+        type: string
+    outputs:
+      deployment_url:
+        description: 'URL of deployed application'
+        value: ${{ jobs.verification.outputs.app_url }}
+      deployment_status:
+        description: 'Status of deployment'
+        value: ${{ jobs.verification.outputs.status }}
+
+permissions:
+  id-token: write   # Required for OIDC authentication
+  contents: read    # Required to checkout code
+
+jobs:
+  load-config:
+    runs-on: ubuntu-latest
+    outputs:
+      instance_name: ${{ steps.config.outputs.instance_name }}
+      static_ip: ${{ steps.config.outputs.static_ip }}
+      aws_region: ${{ steps.config.outputs.aws_region }}
+      app_name: ${{ steps.config.outputs.app_name }}
+      app_type: ${{ steps.config.outputs.app_type }}
+      app_version: ${{ steps.config.outputs.app_version }}
+      should_deploy: ${{ steps.config.outputs.should_deploy }}
+      enabled_dependencies: ${{ steps.config.outputs.enabled_dependencies }}
+      test_enabled: ${{ steps.config.outputs.test_enabled }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::257429339749:role/GitHubActionsRole
+        aws-region: us-east-1
+
+    - name: Setup Python
+      run: python3 -m pip install --upgrade pip boto3
+
+    - name: Load Configuration and Setup Instance
+      id: config
+      run: |
+        python3 << 'EOF'
+        import yaml
+        import os
+        import boto3
+        import time
+        
+        config_file = "${{ inputs.config_file }}"
+        print(f"🔧 Loading configuration from {config_file}...")
+        
+        # Load configuration
+        with open(config_file, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Extract values from config (allow input overrides)
+        instance_name = "${{ inputs.instance_name }}" or config['lightsail']['instance_name']
+        aws_region = "${{ inputs.aws_region }}" or config['aws']['region']
+        app_name = config['application']['name']
+        app_type = config['application']['type']
+        app_version = config['application']['version']
+        
+        print(f"✅ Instance Name: {instance_name}")
+        print(f"✅ AWS Region: {aws_region}")
+        print(f"✅ Application: {app_name} v{app_version}")
+        print(f"✅ App Type: {app_type}")
+        
+        # Initialize Lightsail client
+        lightsail = boto3.client('lightsail', region_name=aws_region)
+        
+        # Check if instance exists, create if not
+        static_ip = ""
+        try:
+            print(f"\n🔍 Checking if instance '{instance_name}' exists...")
+            response = lightsail.get_instance(instanceName=instance_name)
+            instance = response['instance']
+            print(f"✅ Instance exists with state: {instance['state']['name']}")
+            
+            # Get public IP
+            if 'publicIpAddress' in instance:
+                static_ip = instance['publicIpAddress']
+                print(f"✅ Public IP: {static_ip}")
+            else:
+                print("⚠️  No public IP found yet")
+                
+        except lightsail.exceptions.NotFoundException:
+            print(f"⚠️  Instance '{instance_name}' not found. Creating new instance...")
+            
+            # Create instance with default settings
+            try:
+                response = lightsail.create_instances(
+                    instanceNames=[instance_name],
+                    availabilityZone=f'{aws_region}a',
+                    blueprintId='ubuntu_22_04',
+                    bundleId='nano_3_0',  # 512 MB RAM, 1 vCPU, 20 GB SSD
+                    tags=[
+                        {'key': 'Application', 'value': app_name},
+                        {'key': 'ManagedBy', 'value': 'GitHub-Actions'},
+                        {'key': 'Type', 'value': app_type}
+                    ]
+                )
+                print(f"✅ Instance creation initiated")
+                
+                # Wait for instance to be running
+                print("⏳ Waiting for instance to be running...")
+                max_wait = 300  # 5 minutes
+                wait_interval = 10
+                elapsed = 0
+                
+                while elapsed < max_wait:
+                    time.sleep(wait_interval)
+                    elapsed += wait_interval
+                    
+                    try:
+                        response = lightsail.get_instance(instanceName=instance_name)
+                        instance = response['instance']
+                        state = instance['state']['name']
+                        print(f"   Instance state: {state} ({elapsed}s elapsed)")
+                        
+                        if state == 'running':
+                            if 'publicIpAddress' in instance:
+                                static_ip = instance['publicIpAddress']
+                                print(f"✅ Instance is running with IP: {static_ip}")
+                                break
+                    except Exception as e:
+                        print(f"   Waiting... {e}")
+                
+                if not static_ip:
+                    print("❌ Instance did not get a public IP within timeout")
+                    exit(1)
+                    
+                # Open firewall ports
+                print("\n🔥 Configuring firewall...")
+                lightsail.put_instance_public_ports(
+                    portInfos=[
+                        {'fromPort': 22, 'toPort': 22, 'protocol': 'tcp'},
+                        {'fromPort': 80, 'toPort': 80, 'protocol': 'tcp'},
+                        {'fromPort': 443, 'toPort': 443, 'protocol': 'tcp'}
+                    ],
+                    instanceName=instance_name
+                )
+                print("✅ Firewall configured (ports 22, 80, 443)")
+                
+            except Exception as e:
+                print(f"❌ Failed to create instance: {e}")
+                exit(1)
+        
+        # Get enabled dependencies
+        enabled_deps = []
+        for dep_name, dep_config in config.get('dependencies', {}).items():
+            if isinstance(dep_config, dict) and dep_config.get('enabled', False):
+                enabled_deps.append(dep_name)
+        
+        enabled_dependencies = ','.join(enabled_deps)
+        
+        # Check if testing is enabled
+        skip_tests = "${{ inputs.skip_tests }}" == "true"
+        test_enabled = not skip_tests and config.get('github_actions', {}).get('jobs', {}).get('test', {}).get('enabled', True)
+        
+        print(f"\n✅ Static IP: {static_ip}")
+        print(f"✅ Enabled Dependencies: {enabled_dependencies}")
+        print(f"✅ Testing Enabled: {test_enabled}")
+        
+        # For reusable workflows, always deploy when called
+        should_deploy = True
+        print(f"🚀 Should Deploy: {should_deploy}")
+        
+        # Write to GitHub outputs
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"instance_name={instance_name}\n")
+            f.write(f"static_ip={static_ip}\n")
+            f.write(f"aws_region={aws_region}\n")
+            f.write(f"app_name={app_name}\n")
+            f.write(f"app_type={app_type}\n")
+            f.write(f"app_version={app_version}\n")
+            f.write(f"should_deploy={str(should_deploy).lower()}\n")
+            f.write(f"enabled_dependencies={enabled_dependencies}\n")
+            f.write(f"test_enabled={str(test_enabled).lower()}\n")
+        EOF
+
+  test:
+    needs: load-config
+    runs-on: ubuntu-latest
+    if: needs.load-config.outputs.test_enabled == 'true'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Test Environment
+      run: |
+        echo "🔧 Setting up test environment for ${{ needs.load-config.outputs.app_type }} application"
+        echo "📦 Dependencies: ${{ needs.load-config.outputs.enabled_dependencies }}"
+
+    - name: Setup PHP (if PHP dependency enabled)
+      if: contains(needs.load-config.outputs.enabled_dependencies, 'php')
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.1'
+        extensions: pdo, pdo_mysql, curl, json, mbstring
+
+    - name: Validate PHP syntax (if PHP enabled)
+      if: contains(needs.load-config.outputs.enabled_dependencies, 'php')
+      run: |
+        echo "🔍 Validating PHP syntax..."
+        find . -name "*.php" -exec php -l {} \;
+
+    - name: Test PHP application (if PHP enabled)
+      if: contains(needs.load-config.outputs.enabled_dependencies, 'php')
+      run: |
+        echo "🧪 Testing PHP application..."
+        # Find the PHP application directory
+        if [ -d "example-lamp-app" ]; then
+          cd example-lamp-app
+        fi
+        
+        # Start PHP server
+        if [ -f "index.php" ]; then
+          php -S localhost:8000 index.php &
+          sleep 5
+          curl -f http://localhost:8000/ || exit 1
+          echo "✅ PHP application test passed"
+        else
+          echo "⚠️  No index.php found, skipping PHP server test"
+        fi
+
+    - name: Setup Python (if Python dependency enabled)
+      if: contains(needs.load-config.outputs.enabled_dependencies, 'python')
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Test Python application (if Python enabled)
+      if: contains(needs.load-config.outputs.enabled_dependencies, 'python')
+      run: |
+        echo "🧪 Testing Python application..."
+        
+        # Find the Python application directory
+        if [ -d "example-python-app" ]; then
+          cd example-python-app
+        fi
+        
+        # Install dependencies
+        if [ -f "requirements.txt" ]; then
+          pip install -r requirements.txt
+          echo "✅ Dependencies installed"
+        fi
+        
+        # Test Flask application
+        if [ -f "app.py" ]; then
+          # Syntax check
+          python -m py_compile app.py
+          echo "✅ Python syntax validation passed"
+          
+          # Start Flask app and test
+          python app.py &
+          APP_PID=$!
+          sleep 5
+          
+          # Test endpoints
+          if curl -f http://localhost:5000/api/health 2>/dev/null; then
+            echo "✅ Flask application is responding"
+            kill $APP_PID
+          else
+            echo "⚠️  Flask application not responding, but syntax is valid"
+            kill $APP_PID 2>/dev/null || true
+          fi
+        else
+          echo "⚠️  No app.py found, skipping Flask test"
+        fi
+
+    - name: Setup Node.js (if Node.js dependency enabled)
+      if: contains(needs.load-config.outputs.enabled_dependencies, 'nodejs')
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Test Node.js application (if Node.js enabled)
+      if: contains(needs.load-config.outputs.enabled_dependencies, 'nodejs')
+      run: |
+        echo "🧪 Testing Node.js application..."
+        if [ -f "package.json" ]; then
+          npm install
+          npm test || echo "No test script found"
+        fi
+        if [ -f "app.js" ] || [ -f "index.js" ]; then
+          node -c app.js || node -c index.js || echo "✅ Node.js syntax validation passed"
+        fi
+
+    - name: Generic Application Tests
+      run: |
+        echo "🧪 Running generic application tests..."
+        
+        # Check for main application files in subdirectories
+        if [ -f "index.html" ] || [ -f "index.php" ] || [ -f "app.py" ] || [ -f "app.js" ] || \
+           [ -f "example-lamp-app/index.php" ] || [ -f "example-nodejs-app/app.js" ] || [ -f "example-python-app/app.py" ]; then
+          echo "✅ Main application file found"
+        else
+          echo "⚠️  No main application file detected"
+        fi
+        
+        if [ -f "${{ inputs.config_file }}" ]; then
+          pip install PyYAML
+          python3 -c "import yaml; yaml.safe_load(open('${{ inputs.config_file }}'))"
+          echo "✅ Configuration file is valid YAML"
+        fi
+
+  pre-steps-generic:
+    needs: [load-config, test]
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      needs.load-config.outputs.should_deploy == 'true' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    environment: ${{ inputs.environment }}
+    steps:
+    - name: Checkout application code
+      uses: actions/checkout@v4
+    
+    - name: Checkout deployment scripts
+      uses: actions/checkout@v4
+      with:
+        repository: naveenraj44125-creator/lamp-stack-lightsail
+        ref: main
+        path: .deployment-scripts
+        token: ${{ github.token }}
+    
+    - name: Copy deployment scripts
+      run: |
+        mkdir -p workflows
+        cp -r .deployment-scripts/workflows/* ./workflows/
+        ls -la workflows/
+        echo "✅ Deployment scripts copied"
+    
+    - name: Debug Deployment Decision
+      run: |
+        echo "🔍 Deployment Debug Information:"
+        echo "Should Deploy: ${{ needs.load-config.outputs.should_deploy }}"
+        echo "Instance Name: ${{ needs.load-config.outputs.instance_name }}"
+        echo "AWS Region: ${{ needs.load-config.outputs.aws_region }}"
+        echo "Dependencies: ${{ needs.load-config.outputs.enabled_dependencies }}"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::257429339749:role/GitHubActionsRole
+        aws-region: ${{ needs.load-config.outputs.aws_region }}
+
+    - name: Setup Python environment
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install boto3
+
+    - name: Generic Environment Preparation & Dependency Installation
+      run: |
+        echo "🔧 Running generic pre-deployment steps..."
+        export GITHUB_ACTIONS=true
+        
+        python3 workflows/deploy-pre-steps-generic.py \
+          --instance-name ${{ needs.load-config.outputs.instance_name }} \
+          --region ${{ needs.load-config.outputs.aws_region }} \
+          --config-file ${{ inputs.config_file }}
+
+  application-package:
+    needs: [load-config]
+    runs-on: ubuntu-latest
+    if: needs.load-config.outputs.should_deploy == 'true'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::257429339749:role/GitHubActionsRole
+        aws-region: ${{ needs.load-config.outputs.aws_region }}
+
+    - name: Build React app if needed
+      run: |
+        if [ -f "example-react-app/package.json" ] && grep -q "example-react-app" "${{ inputs.config_file }}"; then
+          echo "📦 Building React application..."
+          cd example-react-app
+          npm install
+          npm run build
+          echo "✅ React build completed"
+        else
+          echo "ℹ️  No React build needed"
+        fi
+
+    - name: Create deployment package
+      run: |
+        echo "📦 Creating application package..."
+        
+        python3 << 'EOF'
+        import yaml
+        import os
+        import subprocess
+        
+        with open('${{ inputs.config_file }}', 'r') as f:
+            config = yaml.safe_load(f)
+        
+        package_files = config.get('application', {}).get('package_files', [])
+        package_fallback = config.get('application', {}).get('package_fallback', True)
+        
+        if package_files:
+            existing_files = []
+            for file_pattern in package_files:
+                if os.path.exists(file_pattern):
+                    existing_files.append(file_pattern)
+            
+            if existing_files:
+                print(f"📦 Packaging specific files: {existing_files}")
+                cmd = ['tar', '-czf', 'app.tar.gz'] + existing_files
+                subprocess.run(cmd, check=True)
+            elif package_fallback:
+                print("📦 Specific files not found, packaging all files as fallback")
+                subprocess.run(['tar', '-czf', 'app.tar.gz', '--exclude=.git', '--exclude=.github', '--exclude=node_modules', '--exclude=*.tar.gz', '.'], check=True)
+            else:
+                print("❌ Specific files not found and fallback disabled")
+                exit(1)
+        else:
+            print("📦 No specific files configured, packaging all files")
+            subprocess.run(['tar', '-czf', 'app.tar.gz', '--exclude=.git', '--exclude=.github', '--exclude=*.tar.gz', '.'], check=True)
+        EOF
+
+    - name: Upload application package
+      uses: actions/upload-artifact@v4
+      with:
+        name: application-package
+        path: app.tar.gz
+        retention-days: 1
+
+  post-steps-generic:
+    needs: [load-config, pre-steps-generic, application-package]
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      needs.load-config.outputs.should_deploy == 'true' &&
+      needs.pre-steps-generic.result == 'success' &&
+      needs.application-package.result == 'success'
+    environment: ${{ inputs.environment }}
+    steps:
+    - name: Checkout application code
+      uses: actions/checkout@v4
+    
+    - name: Checkout deployment scripts
+      uses: actions/checkout@v4
+      with:
+        repository: naveenraj44125-creator/lamp-stack-lightsail
+        path: .deployment-scripts
+    
+    - name: Copy deployment scripts
+      run: |
+        cp -r .deployment-scripts/workflows ./
+        echo "✅ Deployment scripts copied"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::257429339749:role/GitHubActionsRole
+        aws-region: ${{ needs.load-config.outputs.aws_region }}
+
+    - name: Setup Python environment
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install boto3
+
+    - name: Download application package
+      uses: actions/download-artifact@v4
+      with:
+        name: application-package
+
+    - name: Generic Application Deployment & Configuration
+      run: |
+        echo "🚀 Running generic application deployment..."
+        export GITHUB_ACTIONS=true
+        
+        python3 workflows/deploy-post-steps-generic.py \
+          app.tar.gz \
+          --instance-name ${{ needs.load-config.outputs.instance_name }} \
+          --region ${{ needs.load-config.outputs.aws_region }} \
+          --config-file ${{ inputs.config_file }} \
+          --verify \
+          --cleanup \
+          --env GITHUB_SHA=${{ github.sha }} \
+          --env GITHUB_REF=${{ github.ref_name }} \
+          --env GITHUB_ACTOR=${{ github.actor }} \
+          --env GITHUB_RUN_ID=${{ github.run_id }} \
+          --env APP_TYPE=${{ needs.load-config.outputs.app_type }} \
+          --env APP_VERSION=${{ needs.load-config.outputs.app_version }}
+
+  verification:
+    needs: [load-config, post-steps-generic]
+    runs-on: ubuntu-latest
+    outputs:
+      app_url: ${{ steps.set-outputs.outputs.app_url }}
+      status: ${{ steps.set-outputs.outputs.status }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::257429339749:role/GitHubActionsRole
+        aws-region: ${{ needs.load-config.outputs.aws_region }}
+
+    - name: Setup Python environment
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install boto3
+
+    - name: External Connectivity Test
+      id: connectivity
+      run: |
+        echo "🌐 Testing external connectivity..."
+        sleep 30
+
+        for i in {1..10}; do
+          echo "Attempt $i/10: Testing http://${{ needs.load-config.outputs.static_ip }}/"
+          
+          # Try to fetch the page and check if we get a 200 response
+          HTTP_CODE=$(curl -s -o /tmp/response.html -w "%{http_code}" http://${{ needs.load-config.outputs.static_ip }}/)
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Got HTTP 200 response!"
+            
+            # Check if response contains HTML content (case-insensitive)
+            if grep -qi "html\|Example\|App\|Hello\|Welcome" /tmp/response.html; then
+              echo "✅ Application is accessible and responding with content!"
+              cat /tmp/response.html | head -20
+              echo "status=success" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              echo "⚠️ Got 200 but unexpected content:"
+              cat /tmp/response.html | head -20
+            fi
+          else
+            echo "❌ Got HTTP $HTTP_CODE"
+          fi
+          
+          echo "Waiting for application to respond... ($i/10)"
+          sleep 10
+        done
+
+        echo "❌ Application failed to respond after 10 attempts"
+        echo "status=failed" >> $GITHUB_OUTPUT
+        exit 1
+
+    - name: Set Outputs
+      id: set-outputs
+      if: always()
+      run: |
+        echo "app_url=http://${{ needs.load-config.outputs.static_ip }}/" >> $GITHUB_OUTPUT
+        echo "status=${{ steps.connectivity.outputs.status || 'failed' }}" >> $GITHUB_OUTPUT
+
+    - name: Deployment Summary
+      if: always()
+      run: |
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Application**: ${{ needs.load-config.outputs.app_name }} v${{ needs.load-config.outputs.app_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **URL**: http://${{ needs.load-config.outputs.static_ip }}/" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ${{ steps.connectivity.outputs.status || 'failed' }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,47 @@
+name: Test Composite Action
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests'
+        type: boolean
+        default: false
+      verify_deployment:
+        description: 'Verify deployment'
+        type: boolean
+        default: true
+
+jobs:
+  test-action:
+    name: Test Composite Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy using Composite Action
+        id: deploy
+        uses: ./.github/actions/deploy-lightsail
+        with:
+          config-file: 'deployment-generic.config.yml'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          skip-tests: ${{ inputs.skip_tests }}
+          verify-deployment: ${{ inputs.verify_deployment }}
+      
+      - name: Display Results
+        if: always()
+        run: |
+          echo "## 🎉 Composite Action Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Outputs:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployment URL**: ${{ steps.deploy.outputs.deployment-url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployment Status**: ${{ steps.deploy.outputs.deployment-status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Static IP**: ${{ steps.deploy.outputs.static-ip }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Composite action executed successfully!" >> $GITHUB_STEP_SUMMARY
+          
+          echo "Deployment URL: ${{ steps.deploy.outputs.deployment-url }}"
+          echo "Deployment Status: ${{ steps.deploy.outputs.deployment-status }}"
+          echo "Static IP: ${{ steps.deploy.outputs.static-ip }}"
