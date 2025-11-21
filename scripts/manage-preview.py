@@ -33,13 +33,16 @@ class PreviewManager:
         print(f"Creating instance: {instance_name}")
         
         # Create user data script for deployment
+        # This script runs on first boot of the Lightsail instance
         user_data = f"""#!/bin/bash
 set -e
-exec > >(tee /var/log/user-data.log) 2>&1
 
-echo "🔧 Setting up preview environment..."
+# Redirect output to log file
+exec >> /var/log/user-data.log 2>&1
 
-# Update system
+echo "Starting deployment at $(date)"
+
+# Update and install packages
 apt-get update -qq
 apt-get install -y nginx git
 
@@ -49,29 +52,14 @@ git clone https://github.com/{repo_name}.git app
 cd app
 git checkout {branch}
 
-# Deploy static preview page
-echo "📦 Deploying preview page..."
+# Deploy preview page
 rm -rf /var/www/html/*
 cp public/preview.html /var/www/html/index.html
 
-# Configure Nginx
-cat > /etc/nginx/sites-available/default << 'EOF'
-server {{
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    root /var/www/html;
-    index index.html;
-    server_name _;
-    location / {{
-        try_files $uri $uri/ =404;
-    }}
-}}
-EOF
-
-# Restart Nginx
+# Restart nginx
 systemctl restart nginx
 
-echo "✅ Deployment complete!"
+echo "Deployment completed at $(date)"
 """
         
         try:
