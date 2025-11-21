@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PR Preview Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+        .container {
+            max-width: 800px;
+            padding: 2rem;
+        }
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        h2 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+        p {
+            font-size: 1.2rem;
+            line-height: 1.6;
+            margin-bottom: 2rem;
+        }
+        .badge {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            margin: 1rem 0;
+        }
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin: 2rem 0;
+        }
+        .feature {
+            background: rgba(255,255,255,0.1);
+            padding: 1.5rem;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 PR Preview System</h1>
+        <div class="badge">✅ Live Preview</div>
+        <h2>Welcome to the PR Preview Demo!</h2>
+        <p>This demonstrates automatic preview environments for Pull Requests using AWS Lightsail and GitHub Actions.</p>
+        
+        <div class="features">
+            <div class="feature">
+                <h3>🔄 Automatic</h3>
+                <p>Every PR gets its own environment</p>
+            </div>
+            <div class="feature">
+                <h3>🔗 Unique URLs</h3>
+                <p>Each PR has a dedicated URL</p>
+            </div>
+            <div class="feature">
+                <h3>🧹 Auto Cleanup</h3>
+                <p>Resources deleted when PR closes</p>
+            </div>
+        </div>
+        
+        <p><strong>Deployed at:</strong> <span id="time"></span></p>
+        <p><strong>Status:</strong> <span style="color: #10b981;">● Online</span></p>
+    </div>
+    
+    <script>
+        document.getElementById('time').textContent = new Date().toLocaleString();
+    </script>
+</body>
+</html>

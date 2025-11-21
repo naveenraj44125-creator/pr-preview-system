@@ -41,7 +41,7 @@ echo "🔧 Setting up preview environment..."
 
 # Update system
 apt-get update -qq
-apt-get install -y nginx git curl
+apt-get install -y nginx git
 
 # Clone repository
 cd /home/ubuntu
@@ -49,37 +49,24 @@ git clone https://github.com/{repo_name}.git app
 cd app
 git checkout {branch}
 
-# Detect app type and deploy
-if [ -f "package.json" ]; then
-    echo "📦 Node.js app detected"
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-    apt-get install -y nodejs
-    
-    cd /home/ubuntu/app
-    npm install
-    
-    # Check if it's a React app
-    if grep -q '"react"' package.json; then
-        echo "⚛️  React app detected"
-        npm run build
-        rm -rf /var/www/html/*
-        cp -r build/* /var/www/html/
-        
-        # Configure Nginx for React SPA
-        cat > /etc/nginx/sites-available/default << 'EOF'
+# Deploy static preview page
+echo "📦 Deploying preview page..."
+rm -rf /var/www/html/*
+cp public/preview.html /var/www/html/index.html
+
+# Configure Nginx
+cat > /etc/nginx/sites-available/default << 'EOF'
 server {{
-    listen 80;
-    server_name _;
+    listen 80 default_server;
+    listen [::]:80 default_server;
     root /var/www/html;
     index index.html;
-    
+    server_name _;
     location / {{
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri/ =404;
     }}
 }}
 EOF
-    fi
-fi
 
 # Restart Nginx
 systemctl restart nginx
@@ -161,10 +148,10 @@ echo "✅ Deployment complete!"
     def deploy_application(self, instance_name, instance_ip, repo_name, branch, commit_sha):
         """Deploy application to instance"""
         print(f"📦 Application deployment initiated via user data...")
-        print(f"⏳ Waiting for deployment to complete (this may take 3-5 minutes)...")
+        print(f"⏳ Waiting for deployment to complete (this may take 2-3 minutes)...")
         
         # Wait for deployment to complete
-        time.sleep(180)  # Give time for user data script to run
+        time.sleep(120)  # Give time for user data script to run
         
         print(f"✅ Deployment should be complete. Check {instance_ip} in your browser.")
         return True
